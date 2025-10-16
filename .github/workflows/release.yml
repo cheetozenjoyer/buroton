@@ -1,102 +1,86 @@
-name: Release
+name: Build Proton
 
 on:
-  release:
-    types: [ published ]
+  workflow_dispatch:
   push:
-    tags:
-      - 'cachyos-*-*-slr'
+    branches:
+      - dwproton-dev
 
-concurrency:
-  group: ${{ github.ref_name }}
-  cancel-in-progress: true
+permissions:
+  contents: write
 
 jobs:
   build:
     name: Build
-    strategy:
-      matrix:
-        include:
-          - name: proton-${{ github.ref_name }}-x86_64
-            cflags: -O2 -march=nocona -mtune=core-avx2
-            rustflags: -Copt-level=3 -Ctarget-cpu=nocona
-          - name: proton-${{ github.ref_name }}-x86_64_v2
-            cflags: -O2 -march=x86-64-v2 -mtune=core-avx2
-            rustflags: -Copt-level=3 -Ctarget-cpu=nocona
-          - name: proton-${{ github.ref_name }}-x86_64_v3
-            cflags: -O2 -march=x86-64-v3 -mtune=core-avx2
-            rustflags: -Copt-level=3 -Ctarget-cpu=nocona
-          - name: proton-${{ github.ref_name }}-x86_64_v4
-            cflags: -O2 -march=x86-64-v4 -mtune=skylake-avx512
-            rustflags: -Copt-level=3 -Ctarget-cpu=nocona
-          - name: proton-${{ github.ref_name }}-x86_64-llvm
-            cflags: -O3 -march=nocona -mtune=core-avx2
-            rustflags: -Copt-level=3 -Ctarget-cpu=nocona
-            configure: '--without-nvidia-libs --proton-sdk-image=sherrydck/proton-sdk-llvm-mingw:latest'
-          - name: proton-${{ github.ref_name }}-x86_64_v2-llvm
-            cflags: -O3 -march=x86-64-v2 -mtune=core-avx2
-            rustflags: -Copt-level=3 -Ctarget-cpu=nocona
-            configure: '--without-nvidia-libs --proton-sdk-image=sherrydck/proton-sdk-llvm-mingw:latest'
-          - name: proton-${{ github.ref_name }}-x86_64_v3-llvm
-            cflags: -O3 -march=x86-64-v3 -mtune=core-avx2
-            rustflags: -Copt-level=3 -Ctarget-cpu=nocona
-            configure: '--without-nvidia-libs --proton-sdk-image=sherrydck/proton-sdk-llvm-mingw:latest'
-          - name: proton-${{ github.ref_name }}-x86_64_v4-llvm
-            cflags: -O3 -march=x86-64-v4 -mtune=skylake-avx512
-            rustflags: -Copt-level=3 -Ctarget-cpu=nocona
-            configure: '--without-nvidia-libs --proton-sdk-image=sherrydck/proton-sdk-llvm-mingw:latest'
-          - name: proton-${{ github.ref_name }}-arm64
-            configure: '--without-nvidia-libs --without-sarek --without-d7vk --target-arch=arm64'
-            runner: 'ubuntu-24.04-arm'
-    uses: ./.github/workflows/_job_build.yml
-    with:
-      name: ${{ matrix.name }}
-      cflags: ${{ matrix.cflags }}
-      rustflags: ${{ matrix.rustflags }}
-      configure: ${{ matrix.configure }}
-      runner: ${{ matrix.runner != '' && matrix.runner || 'ubuntu-24.04' }}
-
-  release:
-    name: Release
-    needs: build
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+
+    - name: Debloat GitHub CI
+      uses: endersonmenezes/free-disk-space@v2
+      with:
+        remove_android: true
+        remove_dotnet: true
+        remove_haskell: true
+        remove_tool_cache: true
+        remove_swap: true
+        remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+        remove_packages_one_command: true
+        remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+        testing: false
+    
+    - name: Prepare host
+      run: sudo apt update && sudo apt-get install -y ccache fontforge-nox
+
+    - name: Restore cache
+      id: ccache-restore
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.ccache
+        key: ccache-proton-${{ github.run_id }}
+        restore-keys: |
+          ccache-proton-
+
+    - name: Checkout
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
         fetch-tags: true
-    - name: Title
-      id: title
-      shell: bash
-      run: |
-        git fetch origin +refs/tags/*:refs/tags/*
-        python -c "v='${{ github.ref_name }}'.split('-');print('title='+'-'.join([v[1],v[2]]))" >> "$GITHUB_OUTPUT"
-    - name: Create
-      id: create
-      shell: bash
-      run: >-
-        gh
-        release create
-        ${{ github.ref_name }}
-        --latest
-        --title "Version ${{ steps.title.outputs.title }}"
-        --notes-from-tag
-        --verify-tag
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        submodules: false
 
-  upload:
-    name: Upload
-    needs: release
-    strategy:
-      matrix:
-        include:
-          - name: proton-${{ github.ref_name }}-x86_64
-          - name: proton-${{ github.ref_name }}-x86_64_v2
-          - name: proton-${{ github.ref_name }}-x86_64_v3
-          - name: proton-${{ github.ref_name }}-x86_64_v4
-          - name: proton-${{ github.ref_name }}-arm64
-    uses: ./.github/workflows/_job_upload.yml
-    with:
-      version: ${{ github.ref_name }}
-      name: ${{ matrix.name }}
+    - name: Patch
+      run: |
+        git submodule update --init --filter=tree:0 --recursive
+        mkdir ./build
+    
+    - name: Configure
+      working-directory: ./build
+      env:
+        RUSTFLAGS: -Copt-level=3 -Ctarget-cpu=nocona
+        USE_LTO: 0
+      run: |
+        ../configure.sh --build-name=dwproton-dev --enable-ccache --container-engine=docker --without-nvidia-libs --without-tts
+
+    - name: Make Proton
+      working-directory: ./build
+      run: |
+        make -j$(nproc) redist
+
+    - name: Save cache
+      id: ccache-save
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.ccache
+        key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: dwproton-dev.tar.xz
+        path: ./build/dwproton-dev.tar.xz
+
+    - name: Upload artifact dwproton-dev.sha512sum
+      uses: actions/upload-artifact@v4
+      with:
+        name: dwproton-dev.sha512sum
+        path: ./build/dwproton-dev.sha512sum
